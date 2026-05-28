@@ -1,0 +1,1579 @@
+File: Assignment_Group_G15_3E.asm
+
+; Title: GardenVille: An Automatic Household Irrigation System
+
+; Group Number: 15
+
+;
+
+; This code reads an analog value from a soil moisture sensor, converts it to a percentage,
+
+; and then controls a series of LEDs and a buzzer to indicate the moisture level.
+
+;
+
+; BUZZER PATTERNS:
+
+; - 0-20% moisture (1st LED): Continuous buzzing (critical level)
+
+; - 21-39% moisture (2nd LED): Beeping pattern (0.5s ON, 1.0s OFF)
+
+; - 40%+ moisture (3rd+ LED): Buzzer off (adequate moisture)
+
+;
+
+; AUTO-WATERING SYSTEM:
+
+; - Motor (LED) turns ON when moisture < 20% for 3+ seconds (starts watering after delay)
+
+; - Motor (LED) turns OFF when moisture >= 80% (stops watering)
+
+; - Uses hysteresis to prevent rapid on/off cycling
+
+; - 3-second delay prevents false triggers from sensor noise
+
+;
+
+; Hardware Connections:
+
+; - Soil Sensor A0  -> PIC RA0/AN0 (analog input)
+
+; - Soil Sensor VCC -> PIC +5V
+
+; - Soil Sensor GND -> PIC GND
+
+;
+
+; LED Connections:
+
+; - RC1 -> LED1 (0-20% moisture - DRY)
+
+; - RC2 -> LED2 (21-40% moisture)
+
+; - RC3 -> LED3 (41-60% moisture)
+
+; - RC4 -> LED4 (61-80% moisture)
+
+; - RC5 -> LED5 (81-100% moisture - WET)
+
+; - RB0 -> Warning LED (RED - indicates need to water)
+
+; - RB1 -> Buzzer (sounds when plant needs water)
+
+; - RB2 -> Water Pump Motor Control (LED for simulation)
+
+ 
+
+   list p=18f4520
+
+   #include <p18f4520.inc>
+
+   
+
+; Configuration bits
+
+   CONFIG  OSC = INTIO67      ; Internal oscillator block
+
+   CONFIG  FCMEN = OFF        ; Fail-Safe Clock Monitor disabled
+
+   CONFIG  IESO = OFF        ; Oscillator Switchover disabled
+
+   CONFIG  PWRT = ON          ; Power-up Timer enabled
+
+   CONFIG  BOREN = ON        ; Brown-out Reset enabled
+
+   CONFIG  BORV = 2          ; VBOR set to 2.79V
+
+   CONFIG  WDT = OFF          ; Watchdog Timer disabled
+
+   CONFIG  WDTPS = 32768      ; Watchdog Timer Postscale
+
+   CONFIG  PBADEN = OFF      ; PORTB<4:0> pins configured as digital I/O
+
+   CONFIG  LPT1OSC = OFF      ; Timer1 configured for higher power operation
+
+   CONFIG  MCLRE = ON        ; MCLR pin enabled
+
+   CONFIG  STVREN = ON        ; Stack full/underflow will cause Reset
+
+   CONFIG  LVP = OFF          ; Single-Supply ICSP disabled
+
+   CONFIG  XINST = OFF        ; Instruction set extension disabled
+
+   CONFIG  DEBUG = OFF        ; Background debugger disabled
+
+   CONFIG  CP0 = OFF          ; Code protection disabled
+
+   CONFIG  CP1 = OFF
+
+   CONFIG  CP2 = OFF
+
+   CONFIG  CP3 = OFF
+
+   CONFIG  CPB = OFF          ; Boot block code protection disabled
+
+   CONFIG  CPD = OFF          ; Data EEPROM code protection disabled
+
+   CONFIG  WRT0 = OFF        ; Write protection disabled
+
+   CONFIG  WRT1 = OFF
+
+   CONFIG  WRT2 = OFF
+
+   CONFIG  WRT3 = OFF
+
+   CONFIG  WRTB = OFF        ; Boot block write protection disabled
+
+   CONFIG  WRTC = OFF        ; Configuration register write protection disabled
+
+   CONFIG  WRTD = OFF        ; Data EEPROM write protection disabled
+
+   CONFIG  EBTR0 = OFF        ; Table read protection disabled
+
+   CONFIG  EBTR1 = OFF
+
+   CONFIG  EBTR2 = OFF
+
+   CONFIG  EBTR3 = OFF
+
+   CONFIG  EBTRB = OFF        ; Boot block table read protection disabled
+
+ 
+
+; Constants
+
+DRY_VALUE_H     EQU 0x03    ; DRY_VALUE = 850 (0x0352)
+
+DRY_VALUE_L     EQU 0x52
+
+WET_VALUE_H     EQU 0x00    ; WET_VALUE = 150 (0x0096)
+
+WET_VALUE_L     EQU 0x96
+
+WARNING_THRESHOLD   EQU 40  ; Warning below 40% moisture
+
+PUMP_START_THRESHOLD EQU 20 ; Start watering below 20% moisture
+
+PUMP_STOP_THRESHOLD  EQU 80 ; Stop watering at 80% moisture
+
+PUMP_DELAY_CYCLES    EQU 6  ; 3 seconds * 2 (500ms cycles)
+
+BUZZER_BEEP_ON_CYCLES  EQU 1  ; 0.5 seconds ON
+
+BUZZER_BEEP_OFF_CYCLES EQU 2  ; 1.0 seconds OFF
+
+ 
+
+; Variable definitions
+
+   UDATA_ACS 0x00
+
+adc_result_h        RES 1  ; ADC result high byte
+
+adc_result_l        RES 1  ; ADC result low byte
+
+moisture_percentage RES 1  ; Calculated moisture percentage
+
+warning_blink_counter RES 1 ; Counter for warning LED blinking
+
+buzzer_beep_counter RES 1  ; Counter for buzzer beeping pattern
+
+buzzer_beep_state   RES 1  ; 0 = OFF period, 1 = ON period
+
+pump_is_running     RES 1  ; Flag to track pump state
+
+pump_delay_counter  RES 1  ; Counter for 3-second delay
+
+pump_delay_active   RES 1  ; Flag to track if delay is active
+
+ 
+
+; Temporary variables for calculations
+
+temp1               RES 1
+
+temp2               RES 1
+
+temp3               RES 1
+
+temp4               RES 1
+
+temp5               RES 1
+
+temp6               RES 1
+
+temp7               RES 1
+
+temp8               RES 1
+
+ 
+
+; Delay variables
+
+delay_count1        RES 1
+
+delay_count2        RES 1
+
+delay_count3        RES 1
+
+ 
+
+; Math variables for percentage calculation
+
+math_dividend_h     RES 1
+
+math_dividend_l     RES 1
+
+math_divisor_h      RES 1
+
+math_divisor_l      RES 1
+
+math_quotient_h     RES 1
+
+math_quotient_l     RES 1
+
+math_remainder_h    RES 1
+
+math_remainder_l    RES 1
+
+ 
+
+; Program code section
+
+   CODE
+
+   ORG 0x0000
+
+   goto main
+
+ 
+
+   ORG 0x0008      ; High priority interrupt vector
+
+   retfie
+
+ 
+
+   ORG 0x0018      ; Low priority interrupt vector
+
+   retfie
+
+ 
+
+;==============================================================================
+
+; MAIN PROGRAM
+
+;==============================================================================
+
+main:
+
+   call system_init
+
+   call adc_init
+
+   call startup_test
+
+   
+
+main_loop:
+
+   call adc_read
+
+   call convert_to_percentage
+
+   call update_moisture_leds
+
+   call update_warning_systems
+
+   call update_auto_watering
+
+   call delay_500ms
+
+   goto main_loop
+
+ 
+
+;==============================================================================
+
+; SYSTEM INITIALIZATION
+
+;==============================================================================
+
+system_init:
+
+   ; Configure internal oscillator to 8MHz
+
+   movlw   0x77        ; IRCF = 111 (8MHz), SCS = 10 (internal osc)
+
+   movwf   OSCCON
+
+   
+
+   ; Configure pin directions
+
+   bsf     TRISA, 0    ; RA0 as input (analog)
+
+   bcf     TRISB, 0    ; RB0 as output (warning LED)
+
+   bcf     TRISB, 1    ; RB1 as output (buzzer)
+
+   bcf     TRISB, 2    ; RB2 as output (water pump)
+
+   clrf    TRISC      ; All PORTC as outputs (moisture LEDs)
+
+   
+
+   ; Initialize output latches
+
+   clrf    LATB
+
+   clrf    LATC
+
+   
+
+   ; Configure analog pins
+
+   movlw   0x0E        ; Only AN0 as analog
+
+   movwf   ADCON1
+
+   movlw   0x07        ; Disable comparators
+
+   movwf   CMCON
+
+   
+
+   ; Initialize variables
+
+   clrf    warning_blink_counter
+
+   clrf    buzzer_beep_counter
+
+   clrf    buzzer_beep_state
+
+   clrf    pump_is_running
+
+   clrf    pump_delay_counter
+
+   clrf    pump_delay_active
+
+   
+
+   return
+
+ 
+
+;==============================================================================
+
+; ADC INITIALIZATION
+
+;==============================================================================
+
+adc_init:
+
+   ; Configure ADCON0
+
+   clrf    ADCON0      ; Clear register, channel 0 selected
+
+   
+
+   ; Configure ADCON2 (Right justified, 4 TAD, FOSC/8)
+
+   movlw   0x91
+
+   movwf   ADCON2
+
+   
+
+   ; Turn on ADC
+
+   bsf     ADCON0, ADON
+
+   
+
+   ; Delay for ADC stabilization
+
+   call    delay_10us
+
+   
+
+   return
+
+ 
+
+;==============================================================================
+
+; ADC READ FUNCTION
+
+;==============================================================================
+
+adc_read:
+
+   ; Start conversion
+
+   bsf     ADCON0, GO
+
+   
+
+   ; Wait for conversion to complete
+
+adc_wait:
+
+   btfsc   ADCON0, GO
+
+   goto    adc_wait
+
+   
+
+   ; Store result
+
+   movf    ADRESH, W
+
+   movwf   adc_result_h
+
+   movf    ADRESL, W
+
+   movwf   adc_result_l
+
+   
+
+   return
+
+ 
+
+;==============================================================================
+
+; CONVERT TO PERCENTAGE FUNCTION
+
+;==============================================================================
+
+convert_to_percentage:
+
+   ; Check if adc_result >= DRY_VALUE (completely dry = 0%)
+
+   movf    adc_result_h, W
+
+   subwf   DRY_VALUE_H, W
+
+   btfss   STATUS, C      ; If carry clear, adc_result_h > DRY_VALUE_H
+
+   goto    check_dry_low
+
+   btfss   STATUS, Z      ; If not zero, values are different
+
+   goto    check_wet      ; adc_result_h < DRY_VALUE_H, continue to wet check
+
+   
+
+   ; High bytes are equal, check low bytes
+
+   movf    adc_result_l, W
+
+   subwf   DRY_VALUE_L, W
+
+   btfss   STATUS, C      ; If carry clear, adc_result >= DRY_VALUE
+
+   goto    set_zero_percent
+
+   goto    check_wet
+
+ 
+
+check_dry_low:
+
+   ; adc_result_h > DRY_VALUE_H, so completely dry
+
+set_zero_percent:
+
+   clrf    moisture_percentage
+
+   return
+
+ 
+
+check_wet:
+
+   ; Check if adc_result <= WET_VALUE (completely wet = 100%)
+
+   movf    WET_VALUE_H, W
+
+   subwf   adc_result_h, W
+
+   btfss   STATUS, C      ; If carry clear, adc_result_h > WET_VALUE_H
+
+   goto    check_wet_low
+
+   btfss   STATUS, Z      ; If not zero, values are different
+
+   goto    calculate_percentage ; adc_result_h < WET_VALUE_H, calculate
+
+   
+
+   ; High bytes are equal, check low bytes
+
+   movf    WET_VALUE_L, W
+
+   subwf   adc_result_l, W
+
+   btfss   STATUS, C      ; If carry clear, adc_result <= WET_VALUE
+
+   goto    set_hundred_percent
+
+   goto    calculate_percentage
+
+ 
+
+check_wet_low:
+
+   ; adc_result_h < WET_VALUE_H, so completely wet
+
+set_hundred_percent:
+
+   movlw   100
+
+   movwf   moisture_percentage
+
+   return
+
+ 
+
+calculate_percentage:
+
+   ; Calculate: 100 - ((adc_result - WET_VALUE) * 100 / (DRY_VALUE - WET_VALUE))
+
+   
+
+   ; First calculate offset = adc_result - WET_VALUE
+
+   movf    WET_VALUE_L, W
+
+   subwf   adc_result_l, W
+
+   movwf   temp1          ; Low byte of offset
+
+   
+
+   movf    WET_VALUE_H, W
+
+   subwfb  adc_result_h, W
+
+   movwf   temp2          ; High byte of offset
+
+   
+
+   ; Calculate range = DRY_VALUE - WET_VALUE
+
+   movf    WET_VALUE_L, W
+
+   subwf   DRY_VALUE_L, W
+
+   movwf   temp3          ; Low byte of range
+
+   
+
+   movf    WET_VALUE_H, W
+
+   subwfb  DRY_VALUE_H, W
+
+   movwf   temp4          ; High byte of range
+
+   
+
+   ; Multiply offset by 100 (offset * 100)
+
+   ; Load offset into dividend
+
+   movf    temp1, W
+
+   movwf   math_dividend_l
+
+   movf    temp2, W
+
+   movwf   math_dividend_h
+
+   
+
+   ; Multiply by 100
+
+   call    multiply_by_100
+
+   
+
+   ; Now divide by range
+
+   movf    temp3, W
+
+   movwf   math_divisor_l
+
+   movf    temp4, W
+
+   movwf   math_divisor_h
+
+   
+
+   call    divide_16bit
+
+   
+
+   ; Result is in math_quotient_l, subtract from 100
+
+   movlw   100
+
+   subwf   math_quotient_l, W
+
+   movwf   moisture_percentage
+
+   
+
+   ; Ensure result is within 0-100 range
+
+   movf    moisture_percentage, W
+
+   sublw   100
+
+   btfss   STATUS, C      ; If result > 100
+
+   goto    set_hundred_percent
+
+   
+
+   return
+
+ 
+
+;==============================================================================
+
+; MULTIPLY BY 100 SUBROUTINE
+
+;==============================================================================
+
+multiply_by_100:
+
+   ; Multiply math_dividend by 100
+
+   ; 100 = 64 + 32 + 4 = multiply by 64, add multiply by 32, add multiply by 4
+
+   
+
+   ; Save original value
+
+   movf    math_dividend_l, W
+
+   movwf   temp5
+
+   movf    math_dividend_h, W
+
+   movwf   temp6
+
+   
+
+   ; Clear result
+
+   clrf    math_quotient_l
+
+   clrf    math_quotient_h
+
+   
+
+   ; Multiply by 4 (shift left 2 times)
+
+   bcf     STATUS, C
+
+   rlcf    temp5, F
+
+   rlcf    temp6, F
+
+   bcf     STATUS, C
+
+   rlcf    temp5, F
+
+   rlcf    temp6, F
+
+   
+
+   ; Add to result
+
+   movf    temp5, W
+
+   addwf   math_quotient_l, F
+
+   movf    temp6, W
+
+   addwfc  math_quotient_h, F
+
+   
+
+   ; Multiply original by 32 (shift left 5 times)
+
+   movf    math_dividend_l, W
+
+   movwf   temp5
+
+   movf    math_dividend_h, W
+
+   movwf   temp6
+
+   
+
+   ; Shift 5 times
+
+   bcf     STATUS, C
+
+   rlcf    temp5, F
+
+   rlcf    temp6, F
+
+   bcf     STATUS, C
+
+   rlcf    temp5, F
+
+   rlcf    temp6, F
+
+   bcf     STATUS, C
+
+   rlcf    temp5, F
+
+   rlcf    temp6, F
+
+   bcf     STATUS, C
+
+   rlcf    temp5, F
+
+   rlcf    temp6, F
+
+   bcf     STATUS, C
+
+   rlcf    temp5, F
+
+   rlcf    temp6, F
+
+   
+
+   ; Add to result
+
+   movf    temp5, W
+
+   addwf   math_quotient_l, F
+
+   movf    temp6, W
+
+   addwfc  math_quotient_h, F
+
+   
+
+   ; Multiply original by 64 (shift left 6 times)
+
+   movf    math_dividend_l, W
+
+   movwf   temp5
+
+   movf    math_dividend_h, W
+
+   movwf   temp6
+
+   
+
+   ; Shift 6 times
+
+   bcf     STATUS, C
+
+   rlcf    temp5, F
+
+   rlcf    temp6, F
+
+   bcf     STATUS, C
+
+   rlcf    temp5, F
+
+   rlcf    temp6, F
+
+   bcf     STATUS, C
+
+   rlcf    temp5, F
+
+   rlcf    temp6, F
+
+   bcf     STATUS, C
+
+   rlcf    temp5, F
+
+   rlcf    temp6, F
+
+   bcf     STATUS, C
+
+   rlcf    temp5, F
+
+   rlcf    temp6, F
+
+   bcf     STATUS, C
+
+   rlcf    temp5, F
+
+   rlcf    temp6, F
+
+   
+
+   ; Add to result
+
+   movf    temp5, W
+
+   addwf   math_quotient_l, F
+
+   movf    temp6, W
+
+   addwfc  math_quotient_h, F
+
+   
+
+   ; Copy result back to dividend for division
+
+   movf    math_quotient_l, W
+
+   movwf   math_dividend_l
+
+   movf    math_quotient_h, W
+
+   movwf   math_dividend_h
+
+   
+
+   return
+
+ 
+
+;==============================================================================
+
+; 16-BIT DIVISION SUBROUTINE
+
+;==============================================================================
+
+divide_16bit:
+
+   ; Divide math_dividend by math_divisor, result in math_quotient
+
+   clrf    math_quotient_l
+
+   clrf    math_quotient_h
+
+   clrf    math_remainder_l
+
+   clrf    math_remainder_h
+
+   
+
+   movlw   16
+
+   movwf   temp8          ; Loop counter
+
+   
+
+div_loop:
+
+   ; Shift dividend left into remainder
+
+   bcf     STATUS, C
+
+   rlcf    math_dividend_l, F
+
+   rlcf    math_dividend_h, F
+
+   rlcf    math_remainder_l, F
+
+   rlcf    math_remainder_h, F
+
+   
+
+   ; Shift quotient left
+
+   rlcf    math_quotient_l, F
+
+   rlcf    math_quotient_h, F
+
+   
+
+   ; Check if remainder >= divisor
+
+   movf    math_divisor_l, W
+
+   subwf   math_remainder_l, W
+
+   movf    math_divisor_h, W
+
+   subwfb  math_remainder_h, W
+
+   
+
+   btfss   STATUS, C
+
+   goto    div_next
+
+   
+
+   ; Remainder >= divisor, so subtract and set quotient bit
+
+   movf    math_divisor_l, W
+
+   subwf   math_remainder_l, F
+
+   movf    math_divisor_h, W
+
+   subwfb  math_remainder_h, F
+
+   
+
+   bsf     math_quotient_l, 0
+
+   
+
+div_next:
+
+   decfsz  temp8, F
+
+   goto    div_loop
+
+   
+
+   return
+
+ 
+
+;==============================================================================
+
+; UPDATE MOISTURE LEDS
+
+;==============================================================================
+
+update_moisture_leds:
+
+   ; Turn off all moisture LEDs first
+
+   bcf     LATC, 1    ; LED_DRY off
+
+   bcf     LATC, 2    ; LED_LOW off
+
+   bcf     LATC, 3    ; LED_MED off
+
+   bcf     LATC, 4    ; LED_HIGH off
+
+   bcf     LATC, 5    ; LED_WET off
+
+   
+
+   ; Check moisture percentage and light appropriate LED
+
+   movf    moisture_percentage, W
+
+   sublw   20          ; W = 20 - moisture_percentage
+
+   btfsc   STATUS, C  ; If carry set, moisture_percentage <= 20
+
+   goto    set_dry_led
+
+   
+
+   movf    moisture_percentage, W
+
+   sublw   40          ; W = 40 - moisture_percentage
+
+   btfsc   STATUS, C  ; If carry set, moisture_percentage <= 40
+
+   goto    set_low_led
+
+   
+
+   movf    moisture_percentage, W
+
+   sublw   60          ; W = 60 - moisture_percentage
+
+   btfsc   STATUS, C  ; If carry set, moisture_percentage <= 60
+
+   goto    set_med_led
+
+   
+
+   movf    moisture_percentage, W
+
+   sublw   80          ; W = 80 - moisture_percentage
+
+   btfsc   STATUS, C  ; If carry set, moisture_percentage <= 80
+
+   goto    set_high_led
+
+   
+
+   ; Otherwise, moisture > 80%
+
+   bsf     LATC, 5    ; LED_WET on
+
+   return
+
+ 
+
+set_dry_led:
+
+   bsf     LATC, 1    ; LED_DRY on
+
+   return
+
+ 
+
+set_low_led:
+
+   bsf     LATC, 2    ; LED_LOW on
+
+   return
+
+ 
+
+set_med_led:
+
+   bsf     LATC, 3    ; LED_MED on
+
+   return
+
+ 
+
+set_high_led:
+
+   bsf     LATC, 4    ; LED_HIGH on
+
+   return
+
+ 
+
+;==============================================================================
+
+; UPDATE WARNING SYSTEMS
+
+;==============================================================================
+
+update_warning_systems:
+
+   ; Warning LED logic (blinks for moisture < 40%)
+
+   movf    moisture_percentage, W
+
+   sublw   WARNING_THRESHOLD - 1  ; W = 39 - moisture_percentage
+
+   btfss   STATUS, C              ; If carry clear, moisture >= 40
+
+   goto    warning_led_off
+
+   
+
+   ; Moisture < 40%, blink warning LED
+
+   incf    warning_blink_counter, F
+
+   movf    warning_blink_counter, W
+
+   sublw   2                      ; Compare with 2
+
+   btfss   STATUS, C              ; If counter >= 2
+
+   goto    warning_blink
+
+   goto    warning_continue
+
+ 
+
+warning_blink:
+
+   ; Toggle warning LED and reset counter
+
+   btg     LATB, 0                ; Toggle warning LED
+
+   clrf    warning_blink_counter
+
+   goto    warning_continue
+
+ 
+
+warning_led_off:
+
+   bcf     LATB, 0                ; Warning LED off
+
+   clrf    warning_blink_counter
+
+ 
+
+warning_continue:
+
+   ; Buzzer logic
+
+   movf    moisture_percentage, W
+
+   sublw   20                      ; W = 20 - moisture_percentage
+
+   btfsc   STATUS, C              ; If carry set, moisture <= 20
+
+   goto    buzzer_continuous
+
+   
+
+   movf    moisture_percentage, W
+
+   sublw   39                      ; W = 39 - moisture_percentage
+
+   btfsc   STATUS, C              ; If carry set, moisture <= 39
+
+   btfss   STATUS, Z              ; And not zero (moisture >= 21)
+
+   goto    check_moisture_21_39
+
+   goto    buzzer_beeping
+
+   
+
+check_moisture_21_39:
+
+   movf    moisture_percentage, W
+
+   sublw   21                      ; W = 21 - moisture_percentage
+
+   btfss   STATUS, C              ; If carry clear, moisture >= 21
+
+   goto    buzzer_beeping
+
+   goto    buzzer_off
+
+ 
+
+buzzer_continuous:
+
+   ; 0-20%: Continuous buzzer
+
+   bcf     LATB, 1                ; Buzzer ON (active low)
+
+   clrf    buzzer_beep_counter
+
+   clrf    buzzer_beep_state
+
+   return
+
+ 
+
+buzzer_beeping:
+
+   ; 21-39%: Beeping pattern
+
+   incf    buzzer_beep_counter, F
+
+   
+
+   btfss   buzzer_beep_state, 0    ; Check if in OFF period (state = 0)
+
+   goto    buzzer_off_period
+
+   
+
+   ; ON period
+
+   bcf     LATB, 1                ; Buzzer ON
+
+   movf    buzzer_beep_counter, W
+
+   sublw   BUZZER_BEEP_ON_CYCLES
+
+   btfsc   STATUS, C              ; If counter >= ON_CYCLES
+
+   return
+
+   
+
+   ; Switch to OFF period
+
+   clrf    buzzer_beep_state
+
+   clrf    buzzer_beep_counter
+
+   return
+
+ 
+
+buzzer_off_period:
+
+   bsf     LATB, 1                ; Buzzer OFF
+
+   movf    buzzer_beep_counter, W
+
+   sublw   BUZZER_BEEP_OFF_CYCLES
+
+   btfsc   STATUS, C              ; If counter >= OFF_CYCLES
+
+   return
+
+   
+
+   ; Switch to ON period
+
+   bsf     buzzer_beep_state, 0
+
+   clrf    buzzer_beep_counter
+
+   return
+
+ 
+
+buzzer_off:
+
+   ; 40%+: Buzzer off
+
+   bsf     LATB, 1                ; Buzzer OFF (active low)
+
+   clrf    buzzer_beep_counter
+
+   clrf    buzzer_beep_state
+
+   return
+
+ 
+
+;==============================================================================
+
+; UPDATE AUTO WATERING
+
+;==============================================================================
+
+update_auto_watering:
+
+   ; Check if moisture < PUMP_START_THRESHOLD (20%)
+
+   movf    moisture_percentage, W
+
+   sublw   PUMP_START_THRESHOLD - 1    ; W = 19 - moisture_percentage
+
+   btfss   STATUS, C                  ; If carry clear, moisture >= 20
+
+   goto    check_pump_stop
+
+   
+
+   ; Moisture < 20%
+
+   ; Check if pump is running or delay is active
+
+   btfsc   pump_is_running, 0
+
+   goto    check_pump_stop            ; Pump already running, check stop condition
+
+   
+
+   btfsc   pump_delay_active, 0
+
+   goto    increment_delay            ; Delay already active, increment counter
+
+   
+
+   ; Start delay countdown
+
+   bsf     pump_delay_active, 0
+
+   clrf    pump_delay_counter
+
+   goto    check_pump_stop
+
+ 
+
+increment_delay:
+
+   incf    pump_delay_counter, F
+
+   movf    pump_delay_counter, W
+
+   sublw   PUMP_DELAY_CYCLES
+
+   btfsc   STATUS, C                  ; If counter >= PUMP_DELAY_CYCLES
+
+   return
+
+   
+
+   ; Delay elapsed, start pump
+
+   bsf     LATB, 2                    ; Water pump ON
+
+   bsf     pump_is_running, 0
+
+   bcf     pump_delay_active, 0
+
+   clrf    pump_delay_counter
+
+   goto    check_pump_stop
+
+ 
+
+reset_delay:
+
+   ; Moisture >= 20%, reset delay if active but pump not running
+
+   btfsc   pump_is_running, 0
+
+   goto    check_pump_stop            ; Pump running, check stop condition
+
+   
+
+   bcf     pump_delay_active, 0
+
+   clrf    pump_delay_counter
+
+ 
+
+check_pump_stop:
+
+   ; Check if pump should stop (moisture >= 80%)
+
+   btfss   pump_is_running, 0
+
+   return                              ; Pump not running, nothing to do
+
+   
+
+   movf    moisture_percentage, W
+
+   sublw   PUMP_STOP_THRESHOLD
+
+   btfss   STATUS, C                  ; If carry clear, moisture >= 80
+
+   return
+
+   
+
+   ; Stop pump
+
+   bcf     LATB, 2                    ; Water pump OFF
+
+   bcf     pump_is_running, 0
+
+   return
+
+ 
+
+;==============================================================================
+
+; STARTUP LED AND BUZZER TEST
+
+;==============================================================================
+
+startup_test:
+
+   ; Turn everything off initially
+
+   clrf    LATB
+
+   clrf    LATC
+
+   call    delay_500ms
+
+   
+
+   ; Light up LEDs sequentially
+
+   bsf     LATC, 1    ; LED_DRY on
+
+   call    delay_200ms
+
+   
+
+   bsf     LATC, 2    ; LED_LOW on
+
+   call    delay_200ms
+
+   
+
+   bsf     LATC, 3    ; LED_MED on
+
+   call    delay_200ms
+
+   
+
+   bsf     LATC, 4    ; LED_HIGH on
+
+   call    delay_200ms
+
+   
+
+   bsf     LATC, 5    ; LED_WET on
+
+   bsf     LATB, 0    ; Warning LED on
+
+   call    delay_200ms
+
+   
+
+   ; Test buzzer
+
+   bcf     LATB, 1    ; Buzzer ON (active low)
+
+   call    delay_300ms
+
+   bsf     LATB, 1    ; Buzzer OFF
+
+   call    delay_200ms
+
+   
+
+   ; Test water pump
+
+   bsf     LATB, 2    ; Water pump ON
+
+   call    delay_200ms
+
+   bcf     LATB, 2    ; Water pump OFF
+
+   call    delay_200ms
+
+   
+
+   ; Turn everything off
+
+   clrf    LATB
+
+   clrf    LATC
+
+   call    delay_300ms
+
+   
+
+   return
+
+ 
+
+;==============================================================================
+
+; DELAY ROUTINES
+
+;==============================================================================
+
+delay_10us:
+
+   movlw   8          ; Approximately 10us at 8MHz
+
+   movwf   delay_count1
+
+delay_10us_loop:
+
+   decfsz  delay_count1, F
+
+   goto    delay_10us_loop
+
+   return
+
+ 
+
+delay_200ms:
+
+   movlw   200        ; 200ms
+
+   movwf   delay_count3
+
+delay_200ms_outer:
+
+   call    delay_1ms
+
+   decfsz  delay_count3, F
+
+   goto    delay_200ms_outer
+
+   return
+
+ 
+
+delay_300ms:
+
+   movlw   100        ; 300ms
+
+   movwf   delay_count3
+
+delay_300ms_outer:
+
+   call    delay_1ms
+
+   decfsz  delay_count3, F
+
+   goto    delay_300ms_outer
+
+   movlw   100
+
+   movwf   delay_count3
+
+delay_300ms_outer2:
+
+   call    delay_1ms
+
+   decfsz  delay_count3, F
+
+   goto    delay_300ms_outer2
+
+   movlw   100
+
+   movwf   delay_count3
+
+delay_300ms_outer3:
+
+   call    delay_1ms
+
+   decfsz  delay_count3, F
+
+   goto    delay_300ms_outer3
+
+   return
+
+ 
+
+delay_500ms:
+
+   movlw   250        ; 500ms = 250 * 2ms
+
+   movwf   delay_count3
+
+delay_500ms_outer:
+
+   call    delay_2ms
+
+   decfsz  delay_count3, F
+
+   goto    delay_500ms_outer
+
+   return
+
+ 
+
+delay_1ms:
+
+   movlw   250        ; 1ms delay loop
+
+   movwf   delay_count1
+
+delay_1ms_outer:
+
+   movlw   2
+
+   movwf   delay_count2
+
+delay_1ms_inner:
+
+   decfsz  delay_count2, F
+
+   goto    delay_1ms_inner
+
+   decfsz  delay_count1, F
+
+   goto    delay_1ms_outer
+
+   return
+
+ 
+
+delay_2ms:
+
+   call    delay_1ms
+
+   call    delay_1ms
+
+   return
+
+ 
+
+   END
