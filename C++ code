@@ -1,0 +1,241 @@
+// GardenVille: Automatic Household Irrigation System
+// Translated from PIC18F4520 Assembly
+
+#include <Arduino.h>
+
+// --- Hardware Pin Definitions ---
+// Note: Mapped for standard C++ frameworks. 
+// For XC8, replace with LATC/LATB register names.
+const int PIN_SENSOR      = A0; 
+const int PIN_LED_DRY     = 2;  // RC1 equivalent
+const int PIN_LED_LOW     = 3;  // RC2 equivalent
+const int PIN_LED_MED     = 4;  // RC3 equivalent
+const int PIN_LED_HIGH    = 5;  // RC4 equivalent
+const int PIN_LED_WET     = 6;  // RC5 equivalent
+const int PIN_WARNING_LED = 7;  // RB0 equivalent
+const int PIN_BUZZER      = 8;  // RB1 equivalent (Active LOW)
+const int PIN_PUMP        = 9;  // RB2 equivalent
+
+// --- Constants ---
+const int DRY_VALUE = 850;
+const int WET_VALUE = 150;
+const int WARNING_THRESHOLD = 40;
+const int PUMP_START_THRESHOLD = 20;
+const int PUMP_STOP_THRESHOLD = 80;
+
+// Timing constants (based on 500ms main loop)
+const int PUMP_DELAY_CYCLES = 6;      // 6 * 500ms = 3 seconds
+const int BUZZER_BEEP_ON_CYCLES = 1;  // 1 * 500ms = 0.5s ON
+const int BUZZER_BEEP_OFF_CYCLES = 2; // 2 * 500ms = 1.0s OFF
+
+// --- Global State Variables ---
+int warning_blink_counter = 0;
+int buzzer_beep_counter = 0;
+bool buzzer_beep_state = false; // false = OFF period, true = ON period
+
+bool pump_is_running = false;
+bool pump_delay_active = false;
+int pump_delay_counter = 0;
+bool warning_led_state = false;
+
+// --- Function Prototypes ---
+void startupTest();
+int getMoisturePercentage();
+void updateMoistureLeds(int percentage);
+void updateWarningSystems(int percentage);
+void updateAutoWatering(int percentage);
+
+void setup() {
+    // Configure Pins
+    pinMode(PIN_SENSOR, INPUT);
+    pinMode(PIN_LED_DRY, OUTPUT);
+    pinMode(PIN_LED_LOW, OUTPUT);
+    pinMode(PIN_LED_MED, OUTPUT);
+    pinMode(PIN_LED_HIGH, OUTPUT);
+    pinMode(PIN_LED_WET, OUTPUT);
+    pinMode(PIN_WARNING_LED, OUTPUT);
+    pinMode(PIN_BUZZER, OUTPUT);
+    pinMode(PIN_PUMP, OUTPUT);
+
+    // Initial state: Buzzer OFF (Active Low), Pump OFF
+    digitalWrite(PIN_BUZZER, HIGH); 
+    digitalWrite(PIN_PUMP, LOW);
+
+    // Run hardware diagnostic
+    startupTest();
+}
+
+void loop() {
+    int moisture_percentage = getMoisturePercentage();
+    
+    updateMoistureLeds(moisture_percentage);
+    updateWarningSystems(moisture_percentage);
+    updateAutoWatering(moisture_percentage);
+    
+    // Main loop delay matching the ASM structure
+    delay(500); 
+}
+
+// --- Functions ---
+
+int getMoisturePercentage() {
+    int raw_adc = analogRead(PIN_SENSOR);
+    
+    // Boundary checks
+    if (raw_adc >= DRY_VALUE) return 0;
+    if (raw_adc <= WET_VALUE) return 100;
+    
+    // The C++ compiler handles the 16-bit math natively here
+    long offset = raw_adc - WET_VALUE;
+    long range = DRY_VALUE - WET_VALUE;
+    int percentage = 100 - ((offset * 100) / range);
+    
+    if (percentage > 100) return 100;
+    if (percentage < 0) return 0;
+    
+    return percentage;
+}
+
+void updateMoistureLeds(int percentage) {
+    // Turn all off first
+    digitalWrite(PIN_LED_DRY, LOW);
+    digitalWrite(PIN_LED_LOW, LOW);
+    digitalWrite(PIN_LED_MED, LOW);
+    digitalWrite(PIN_LED_HIGH, LOW);
+    digitalWrite(PIN_LED_WET, LOW);
+
+    // Light appropriate LED
+    if (percentage <= 20) {
+        digitalWrite(PIN_LED_DRY, HIGH);
+    } else if (percentage <= 40) {
+        digitalWrite(PIN_LED_LOW, HIGH);
+    } else if (percentage <= 60) {
+        digitalWrite(PIN_LED_MED, HIGH);
+    } else if (percentage <= 80) {
+        digitalWrite(PIN_LED_HIGH, HIGH);
+    } else {
+        digitalWrite(PIN_LED_WET, HIGH);
+    }
+}
+
+void updateWarningSystems(int percentage) {
+    // --- Warning LED Logic ---
+    if (percentage >= WARNING_THRESHOLD) {
+        digitalWrite(PIN_WARNING_LED, LOW);
+        warning_blink_counter = 0;
+        warning_led_state = false;
+    } else {
+        warning_blink_counter++;
+        if (warning_blink_counter >= 2) {
+            warning_led_state = !warning_led_state; // Toggle
+            digitalWrite(PIN_WARNING_LED, warning_led_state ? HIGH : LOW);
+            warning_blink_counter = 0;
+        }
+    }
+
+    // --- Buzzer Logic (Active LOW) ---
+    if (percentage <= 20) {
+        // Continuous buzzing
+        digitalWrite(PIN_BUZZER, LOW); 
+        buzzer_beep_counter = 0;
+        buzzer_beep_state = false;
+    } else if (percentage <= 39) {
+        // Beeping pattern
+        buzzer_beep_counter++;
+        
+        if (buzzer_beep_state == false) { // Currently in OFF period
+            digitalWrite(PIN_BUZZER, HIGH); // Buzzer off
+            if (buzzer_beep_counter >= BUZZER_BEEP_OFF_CYCLES) {
+                buzzer_beep_state = true; // Switch to ON
+                buzzer_beep_counter = 0;
+            }
+        } else { // Currently in ON period
+            digitalWrite(PIN_BUZZER, LOW); // Buzzer on
+            if (buzzer_beep_counter >= BUZZER_BEEP_ON_CYCLES) {
+                buzzer_beep_state = false; // Switch to OFF
+                buzzer_beep_counter = 0;
+            }
+        }
+    } else {
+        // Adequate moisture, buzzer off
+        digitalWrite(PIN_BUZZER, HIGH); 
+        buzzer_beep_counter = 0;
+        buzzer_beep_state = false;
+    }
+}
+
+void updateAutoWatering(int percentage) {
+    // Hysteresis logic
+    if (percentage < PUMP_START_THRESHOLD) {
+        if (pump_is_running) {
+            return; // Already watering
+        }
+        
+        if (pump_delay_active) {
+            pump_delay_counter++;
+            if (pump_delay_counter >= PUMP_DELAY_CYCLES) {
+                digitalWrite(PIN_PUMP, HIGH); // Start pump
+                pump_is_running = true;
+                pump_delay_active = false;
+                pump_delay_counter = 0;
+            }
+        } else {
+            // Start the delay countdown
+            pump_delay_active = true;
+            pump_delay_counter = 0;
+        }
+    } else {
+        // Moisture is >= 20%
+        if (!pump_is_running) {
+            // Reset delay if pump wasn't triggered yet
+            pump_delay_active = false;
+            pump_delay_counter = 0;
+            return;
+        }
+        
+        // If pump is running, check if it reached the stop threshold
+        if (percentage >= PUMP_STOP_THRESHOLD) {
+            digitalWrite(PIN_PUMP, LOW); // Stop pump
+            pump_is_running = false;
+        }
+    }
+}
+
+void startupTest() {
+    delay(500); // Initial boot delay
+
+    // Test moisture LEDs
+    digitalWrite(PIN_LED_DRY, HIGH);
+    delay(200);
+    digitalWrite(PIN_LED_LOW, HIGH);
+    delay(200);
+    digitalWrite(PIN_LED_MED, HIGH);
+    delay(200);
+    digitalWrite(PIN_LED_HIGH, HIGH);
+    delay(200);
+    digitalWrite(PIN_LED_WET, HIGH);
+    digitalWrite(PIN_WARNING_LED, HIGH);
+    delay(200);
+
+    // Test buzzer
+    digitalWrite(PIN_BUZZER, LOW);
+    delay(300);
+    digitalWrite(PIN_BUZZER, HIGH);
+    delay(200);
+
+    // Test pump
+    digitalWrite(PIN_PUMP, HIGH);
+    delay(200);
+    digitalWrite(PIN_PUMP, LOW);
+    delay(200);
+
+    // Clear all outputs before starting main loop
+    digitalWrite(PIN_LED_DRY, LOW);
+    digitalWrite(PIN_LED_LOW, LOW);
+    digitalWrite(PIN_LED_MED, LOW);
+    digitalWrite(PIN_LED_HIGH, LOW);
+    digitalWrite(PIN_LED_WET, LOW);
+    digitalWrite(PIN_WARNING_LED, LOW);
+    
+    delay(300);
+}
